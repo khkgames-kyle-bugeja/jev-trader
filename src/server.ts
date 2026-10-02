@@ -24,6 +24,7 @@ export function startServer(meta: Meta, history: () => BlockEvent[]) {
   setInterval(() => clients.forEach((c) => send(c, "ping", Date.now())), 15_000);
 
   Bun.serve({
+    hostname: config.serverHost,
     port: config.port,
     fetch(req) {
       const { pathname } = new URL(req.url);

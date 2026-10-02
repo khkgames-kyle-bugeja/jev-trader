@@ -89,8 +89,8 @@ export async function readBook(provider: RpcProvider, market: string, params: Bo
 }
 
 /** One eth_call. Use every N blocks to decide whether `vault: true` is needed. */
-export async function readVaultParams(provider: RpcProvider, market: string, blockTag = "latest"): Promise<VaultParams> {
-  const json = await rpcPost(urlOf(provider), ethCall(1, market, SEL_GET_VAULT_PARAMS, blockTag));
+export async function readVaultParams(provider: RpcProvider, market: string, blockTag = "latest", timeoutMs?: number): Promise<VaultParams> {
+  const json = await rpcPost(urlOf(provider), ethCall(1, market, SEL_GET_VAULT_PARAMS, blockTag), timeoutMs);
   if (!json?.result) throw new Error(`getVaultParams: ${json?.error?.message ?? "no result"}`);
   return decodeVaultParams(json.result);
 }

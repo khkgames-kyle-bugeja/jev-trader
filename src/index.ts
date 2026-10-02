@@ -17,7 +17,7 @@ for (const [key, value] of Object.entries({
   MAX_SPREAD_BPS: config.maxSpreadBps, MAX_SESSION_GAS_MON: config.maxSessionGasMon,
   MAX_SESSION_LOSS_USD: config.maxSessionLossUsd, JEV_USD_PER_MTOK: config.jevUsdPerMTok,
   MAX_PRE_SEND_MS: config.maxPreSendMs, MAX_MARGIN_AGE_MS: config.maxMarginAgeMs,
-  MAX_EVENT_LOG_MB: config.maxEventLogMb,
+  MAX_EVENT_LOG_MB: config.maxEventLogMb, RPC_TIMEOUT_MS: config.rpcTimeoutMs,
 })) {
   if (!Number.isFinite(value) || value <= 0) throw new Error(`${key} must be a positive finite number`);
 }
@@ -71,5 +71,6 @@ const trader = new Trader(
 );
 trader.attachTradeFeed(log10(market.params.sizePrecision));
 
-console.log(`jev-trader · model=${model.name} · post-only ${config.quoteInsideTicks} tick inside the touch · horizon ${config.horizonBlocks} blocks · ${config.dryRun ? "DRY RUN" : `wallet ${market.address}`} · market ${config.market} · read ${config.readRpcUrl} · :${config.port}`);
+const publicReadRpc = /^https:\/\/rpc[123]?\.monad\.xyz\/?$/.test(config.readRpcUrl);
+console.log(`jev-trader · model=${model.name} · post-only ${config.quoteInsideTicks} tick inside the touch · horizon ${config.horizonBlocks} blocks · ${config.dryRun ? "DRY RUN" : `wallet ${market.address}`} · market ${config.market} · read ${publicReadRpc ? config.readRpcUrl : "configured private RPC"} · ${config.serverHost}:${config.port}`);
 startBlockFeed((block) => trader.onBlock(block));

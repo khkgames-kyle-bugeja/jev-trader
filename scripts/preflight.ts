@@ -9,10 +9,12 @@ const provider = new ethers.providers.StaticJsonRpcProvider(config.readRpcUrl, c
 const params = await Kuru.ParamFetcher.getMarketParams(provider, config.market);
 const minMon = Number(ethers.utils.formatUnits(params.minSize, log10(params.sizePrecision)));
 const maxMon = Number(ethers.utils.formatUnits(params.maxSize, log10(params.sizePrecision)));
+const reserveMon = config.maxSessionGasMon + 2 * Math.max(config.gasLimit ?? config.gasLimitFallback, 1_000_000) * config.maxFeeGwei / 1e9;
 const market = {
   chainId: config.chainId, market: config.market, marginAccount: config.marginAccount,
   quoteToken: params.quoteAssetAddress, minOrderMon: minMon, maxOrderMon: maxMon,
   configuredOrderMon: config.tradeSizeMon,
+  illustrativeWalletGasReserveMon: Number(reserveMon.toFixed(6)),
 };
 console.log("Kuru MON-USDC market (read-only):", JSON.stringify(market, null, 2));
 if (config.tradeSizeMon < minMon || config.tradeSizeMon > maxMon) {
@@ -43,6 +45,7 @@ if (input) {
     marginUsdc: ethers.utils.formatUnits(marginUsdc, params.quoteAssetDecimals.toNumber()),
   }, null, 2));
   console.log("An ask needs at least one order size in margin MON; a bid needs enough margin USDC. Wallet MON separately pays gas. No transaction was sent.");
+  console.log("Wallet gas reserve is a safety floor based on the current configured gas limit/fee cap; live startup may require more after on-chain estimation.");
 } else {
   console.log("Set WALLET_ADDRESS to your public dedicated wallet address to inspect wallet and Kuru margin balances without a private key.");
 }

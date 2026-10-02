@@ -6,7 +6,9 @@ export async function rpc<T = unknown>(method: string, params: unknown[] = [], u
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    signal: AbortSignal.timeout(config.rpcTimeoutMs),
   });
+  if (!res.ok) throw new Error(`${method}: rpc http ${res.status}`);
   const json = (await res.json()) as { result?: T; error?: { code: number; message: string } };
   if (json.error) throw new Error(`${method}: ${json.error.message} (${json.error.code})`);
   return json.result as T;
@@ -20,6 +22,7 @@ export async function rpc<T = unknown>(method: string, params: unknown[] = [], u
  */
 export function startBlockFeed(onBlock: (block: number) => void, pollMs = 150) {
   let last = 0, newest = 0, scheduled = false;
+  let polling = false;
   const emit = (block: number) => {
     if (block <= last) return;
     last = newest = block;
@@ -29,7 +32,10 @@ export function startBlockFeed(onBlock: (block: number) => void, pollMs = 150) {
   };
 
   const poll = async () => {
+    if (polling) return;
+    polling = true;
     try { emit(parseInt(await rpc<string>("eth_blockNumber", [], config.readRpcUrl), 16)); } catch {}
+    finally { polling = false; }
   };
   setInterval(poll, pollMs);
   poll();

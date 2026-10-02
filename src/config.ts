@@ -5,6 +5,7 @@ const dryRun = env("DRY_RUN") === "true" || !env("PRIVATE_KEY");
 export const config = {
   rpcUrl: env("RPC_URL", "https://rpc.monad.xyz")!, // sends, receipts, nonce, gas estimation
   readRpcUrl: env("READ_RPC_URL", "https://rpc.monad.xyz")!, // book reads + eth_blockNumber polling + trade logs
+  rpcTimeoutMs: Number(env("RPC_TIMEOUT_MS", "2000")),
   wsUrl: env("WS_URL"), // optional; polling backstop always runs
   chainId: 143,
   market: env("MARKET", "0x065C9d28E428A0db40191a54d33d5b7c71a9C394")!, // Kuru MON-USDC
@@ -43,5 +44,6 @@ export const config = {
   jevModelId: env("JEV_MODEL_ID", "jev-latest")!,
   jevUsdPerMTok: Number(env("JEV_USD_PER_MTOK", "0.042")), // indicative: confirm current provider price
   port: Number(env("PORT", "3000")),
+  serverHost: env("SERVER_HOST", dryRun ? "0.0.0.0" : "127.0.0.1")!,
   historySize: 1000,
 };

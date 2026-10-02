@@ -12,7 +12,7 @@ if (!Number.isInteger(samples)) throw new Error("RPC_SAMPLES must be an integer"
 const provider = new ethers.providers.StaticJsonRpcProvider(config.readRpcUrl, config.chainId);
 const params = await Kuru.ParamFetcher.getMarketParams(provider, config.market);
 const at = (x: number[], p: number) => x.sort((a, b) => a - b)[Math.ceil(p * x.length) - 1];
-for (const url of urls) {
+for (const [index, url] of urls.entries()) {
   const times: number[] = [];
   const errors: string[] = [];
   for (let i = 0; i < samples + 1; i++) {
@@ -22,7 +22,8 @@ for (const url of urls) {
       if (i > 0) times.push(Math.round(performance.now() - t)); // first call warms TLS
     } catch (e) { errors.push((e as Error).message.slice(0, 100)); }
   }
-  const result = { url, samples: times.length, failures: errors.length,
+  const label = /^https:\/\/rpc[123]?\.monad\.xyz\/?$/.test(url) ? url : `custom RPC #${index + 1}`;
+  const result = { endpoint: label, samples: times.length, failures: errors.length,
     p50Ms: times.length ? at([...times], 0.5) : null,
     p95Ms: times.length ? at([...times], 0.95) : null,
     likelyFits200MsPreSendBudget: times.length === samples && at([...times], 0.95)! < 200,

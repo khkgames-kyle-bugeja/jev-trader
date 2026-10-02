@@ -75,6 +75,7 @@ export class Trader {
   /** Live quotes sent but not yet confirmed; they may become resting orders, so they count toward the cap. */
   private inflight = new Map<string, Quote>();
   private cancelInFlight = false;
+  private cancelRequested = false;
   private simId = 0;
   private position = { mon: 0, costUsd: 0 }; // signed inventory and its cost basis
   private totals: Totals = { blocks: 0, decisions: 0, quotes: 0, fills: 0, reverted: 0, lateBlocks: 0, jevUsd: 0, gasMon: 0, gasUsd: 0, realizedUsd: 0, pnlUsd: 0, pnlMon: 0, pnlPct: 0 };
@@ -117,6 +118,11 @@ export class Trader {
         this.emit(block, book, null, null, false, { readMs: Math.round(readMs), loopMs: Math.round(performance.now() - t0) }, reason);
         return;
       }
+      if (performance.now() - t0 > config.maxPreSendMs) {
+        await this.cancelOnPause(block);
+        this.emit(block, book, null, null, false, { readMs: Math.round(readMs), loopMs: Math.round(performance.now() - t0) }, "pre-send latency budget");
+        return;
+      }
 
       const decision = await this.model.decide(this.buildState(block, book));
       const wanted: Side = decision.action === "sell" ? "sell" : "buy";
@@ -138,7 +144,9 @@ export class Trader {
       let quote: Quote | null = null;
       if (side) {
         const cancel = [...this.orders.keys()].filter((id) => id > 0); // simulated orders have negative ids
-        quote = await this.market.send(block, side, config.tradeSizeMon, book, cancel, side !== wanted);
+        quote = await this.market.send(block, side, config.tradeSizeMon, book, cancel, side !== wanted,
+          t0 + config.maxPreSendMs,
+          () => !this.cancelRequested && !existsSync("data/PAUSE") && !this.riskReason(block, book) && this.allowed(side, book));
         this.totals.quotes++;
         if (quote.status === "sim") {
           for (const o of this.paperOrders.values()) if (o.expiresBlock === undefined) o.expiresBlock = block;
@@ -166,6 +174,7 @@ export class Trader {
   private confirmPending(block: number) {
     this.market.pollPending(block).then((results) => {
       for (const r of results) this.applyQuoteResult(r);
+      if (this.cancelRequested && this.orders.size) void this.cancelOnPause(block);
     }).catch(() => {});
   }
 
@@ -185,26 +194,31 @@ export class Trader {
 
   private riskReason(block: number, book: Book) {
     if (this.market.safetyHaltReason) return this.market.safetyHaltReason;
+    if (this.cancelRequested && (this.orders.size || this.inflight.size || this.cancelInFlight)) return "canceling live orders";
     if (this.market.wallet && (!Number.isFinite(this.market.marginUpdatedAt) ||
       Date.now() - this.market.marginUpdatedAt > config.maxMarginAgeMs)) return "stale margin balance";
-    return pauseReason({
+    const reason = pauseReason({
       block, book, paused: existsSync("data/PAUSE"),
       pnlUsd: this.totals.realizedUsd + this.unrealizedUsd(book.mid) - this.totals.gasUsd - this.totals.jevUsd,
       gasMon: this.totals.gasMon + [...this.inflight.values()].reduce((sum, q) => sum + q.gasMon, 0),
       nextGasMon: this.market.estimatedQuoteGasMon,
     }, config);
+    if (!reason && this.cancelRequested) this.cancelRequested = false; // no pending or resting orders remain
+    return reason;
   }
 
   /** A risk pause stops new quotes AND attempts to remove all known resting live orders. */
   private async cancelOnPause(block: number) {
+    if (this.market.wallet) this.cancelRequested = true;
     if (!this.market.wallet || !this.orders.size || this.cancelInFlight || this.market.safetyHaltReason) return;
+    this.cancelInFlight = true; // claim the slot BEFORE the first await (gas estimation)
     try {
       const cancellation = await this.market.cancelResting(block, [...this.orders.keys()]);
       if (cancellation?.txHash) {
-        this.cancelInFlight = true;
         this.inflight.set(cancellation.txHash, cancellation);
-      }
+      } else this.cancelInFlight = false;
     } catch (e) {
+      this.cancelInFlight = false;
       console.error(`block ${block}: failed to cancel resting orders:`, (e as Error).message);
     }
   }
