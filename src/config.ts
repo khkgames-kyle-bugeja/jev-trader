@@ -23,6 +23,7 @@ export const config = {
   maxBookAgeBlocks: Number(env("MAX_BOOK_AGE_BLOCKS", "10")),
   maxSpreadBps: Number(env("MAX_SPREAD_BPS", "100")),
   maxSessionGasMon: Number(env("MAX_SESSION_GAS_MON", "1")),
+  maxSessionQuotes: Number(env("MAX_SESSION_QUOTES", "1000000")),
   maxSessionLossUsd: Number(env("MAX_SESSION_LOSS_USD", "10")),
   maxMarginAgeMs: Number(env("MAX_MARGIN_AGE_MS", "10000")),
   maxEventLogMb: Number(env("MAX_EVENT_LOG_MB", "20")),

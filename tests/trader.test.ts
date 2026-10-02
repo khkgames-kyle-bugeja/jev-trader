@@ -49,6 +49,20 @@ function harness(opts: { book?: Book; readBook?: () => Promise<Book>; modelName?
 }
 
 describe("trading loop safety", () => {
+  test("one-quote live canary pauses before a second model call or broadcast", async () => {
+    const previous = config.maxSessionQuotes;
+    try {
+      config.maxSessionQuotes = 1;
+      const h = harness({ wallet: true, marginUsdc: 1000, liveQuote: true });
+      await h.trader.onBlock(100);
+      await h.trader.onBlock(101);
+      expect(h.sends).toBe(1);
+      expect(h.calls).toBe(1);
+      expect(h.events[1]?.pauseReason).toBe("session quote limit");
+      expect(h.events[1]?.quote).toBeNull();
+    } finally { config.maxSessionQuotes = previous; }
+  });
+
   test("a paused in-flight quote is canceled as soon as its order receipt arrives", async () => {
     let spread = 10;
     const h = harness({ wallet: true, marginUsdc: 1000, liveQuote: true,

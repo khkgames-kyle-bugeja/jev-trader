@@ -195,6 +195,7 @@ export class Trader {
   private riskReason(block: number, book: Book) {
     if (this.market.safetyHaltReason) return this.market.safetyHaltReason;
     if (this.cancelRequested && (this.orders.size || this.inflight.size || this.cancelInFlight)) return "canceling live orders";
+    if (this.market.wallet && this.totals.quotes >= config.maxSessionQuotes) return "session quote limit";
     if (this.market.wallet && (!Number.isFinite(this.market.marginUpdatedAt) ||
       Date.now() - this.market.marginUpdatedAt > config.maxMarginAgeMs)) return "stale margin balance";
     const reason = pauseReason({
