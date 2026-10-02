@@ -75,6 +75,7 @@ export default function Feed({ events }: { events: BlockEvent[] }) {
             const kind = kindOf(event);
             const decision = event.decision;
             const quote = event.quote;
+            const cancel = event.cancel;
             const fill = event.fill;
             const decided = kind === "buy" || kind === "sell";
             const kindClass = KIND_CLASS[kind];
@@ -95,6 +96,9 @@ export default function Feed({ events }: { events: BlockEvent[] }) {
             let detailMuted = false;
             if (fill && fill.size > 0) {
               detail = `FILL ${fmtSize(fill.size)} @ ${fmtPrice(fill.price)}`;
+            } else if (cancel) {
+              detail = `CANCEL ${cancel.status.toUpperCase()} ${cancel.orderIds.length} orders`;
+              detailMuted = cancel.status !== "placed";
             } else if (decided && quote) {
               const word = quote.side === "buy" ? "bid" : "ask";
               detail = `${word} ${fmtSize(quote.size)} @ ${fmtPrice(quote.price)}${quote.capped ? " cap" : ""}`;
@@ -126,6 +130,10 @@ export default function Feed({ events }: { events: BlockEvent[] }) {
                   {fill && !fill.simulated && fill.txHash ? (
                     <a href={txUrl(fill.txHash)} target="_blank" rel="noreferrer" title="the taker's transaction">
                       {shortTx(fill.txHash)}
+                    </a>
+                  ) : cancel?.txHash ? (
+                    <a href={txUrl(cancel.txHash)} target="_blank" rel="noreferrer" title={`cancellation ${cancel.status}`}>
+                      {shortTx(cancel.txHash)}
                     </a>
                   ) : quote && quote.status === "sim" ? (
                     <span className={styles.muted}>sim</span>

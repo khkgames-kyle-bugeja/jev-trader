@@ -1,17 +1,22 @@
 const env = (key: string, fallback?: string) => process.env[key] ?? fallback;
 const num = (key: string) => (env(key) ? Number(env(key)) : undefined);
+const dryRun = env("DRY_RUN") === "true" || !env("PRIVATE_KEY");
 
 export const config = {
   rpcUrl: env("RPC_URL", "https://rpc.monad.xyz")!, // sends, receipts, nonce, gas estimation
   readRpcUrl: env("READ_RPC_URL", "https://rpc.monad.xyz")!, // book reads + eth_blockNumber polling + trade logs
+  rpcTimeoutMs: Number(env("RPC_TIMEOUT_MS", "2000")),
   wsUrl: env("WS_URL"), // optional; polling backstop always runs
   chainId: 143,
   market: env("MARKET", "0x065C9d28E428A0db40191a54d33d5b7c71a9C394")!, // Kuru MON-USDC
   /** Kuru MarginAccount this market settles against (slot 73 of the OrderBook proxy; verifiedMarket(market) is true). */
   marginAccount: env("MARGIN_ACCOUNT", "0x2A68ba1833cDf93fa9Da1EEbd7F46242aD8E90c5")!,
   privateKey: env("PRIVATE_KEY"),
-  dryRun: env("DRY_RUN") === "true" || !env("PRIVATE_KEY"),
+  dryRun,
   enableLiveTrading: env("ENABLE_LIVE_TRADING") === "true",
+  liveStateDir: env("LIVE_STATE_DIR"), // existing, durable directory; a marker blocks unsafe restarts
+  autoDepositMargin: env("AUTO_DEPOSIT_MARGIN") === "true", // off by default
+  maxPreSendMs: Number(env("MAX_PRE_SEND_MS", dryRun ? "750" : "200")),
   tradeSizeMon: Number(env("TRADE_SIZE_MON", "200")), // Kuru MON-USDC minimum order is 200 MON
   maxPositionMon: Number(env("MAX_POSITION_MON", "1000")),
   bankrollUsd: Number(env("BANKROLL_USD", "100")), // used for pnlPct
@@ -19,6 +24,8 @@ export const config = {
   maxSpreadBps: Number(env("MAX_SPREAD_BPS", "100")),
   maxSessionGasMon: Number(env("MAX_SESSION_GAS_MON", "1")),
   maxSessionLossUsd: Number(env("MAX_SESSION_LOSS_USD", "10")),
+  maxMarginAgeMs: Number(env("MAX_MARGIN_AGE_MS", "10000")),
+  maxEventLogMb: Number(env("MAX_EVENT_LOG_MB", "20")),
   /** Quote this many ticks inside the touch (0 = join the best bid/ask). Never crosses: clamps to the touch when the spread is too tight. */
   quoteInsideTicks: Number(env("QUOTE_INSIDE_TICKS", "1")),
   /** Startup deposits into the Kuru margin account, topped up to these balances. Limit orders draw from margin, not the wallet. */
@@ -31,11 +38,12 @@ export const config = {
   maxFeeGwei: Number(env("MAX_FEE_GWEI", "400")),
   priorityFeeGwei: Number(env("PRIORITY_FEE_GWEI", "2")), // Monad hardcodes eth_maxPriorityFeePerGas at 2
   pendingBlocks: 10, // give up on a tx with no receipt after this many blocks
-  refreshBlocks: 200, // how often to refresh the fee estimate, margin balances and the vault check
+  refreshBlocks: 20, // how often to refresh the fee estimate, margin balances and the vault check
   horizonBlocks: Number(env("HORIZON_BLOCKS", "100")), // the model is asked about the move over this many blocks (~30 s)
   model: env("MODEL", "mock") as "mock" | "jev",
   jevModelId: env("JEV_MODEL_ID", "jev-latest")!,
   jevUsdPerMTok: Number(env("JEV_USD_PER_MTOK", "0.042")), // indicative: confirm current provider price
   port: Number(env("PORT", "3000")),
+  serverHost: env("SERVER_HOST", dryRun ? "0.0.0.0" : "127.0.0.1")!,
   historySize: 1000,
 };

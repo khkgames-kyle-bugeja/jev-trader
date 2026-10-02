@@ -20,6 +20,8 @@
     "start": "bun run src/index.ts",
     "dev": "bun --watch run src/index.ts",
     "test": "bun test",
-    "typecheck": "bunx tsc --noEmit"
+    "typecheck": "bunx tsc --noEmit",
+    "preflight": "bun run scripts/preflight.ts",
+    "bench:rpc": "bun run scripts/bench-rpc.ts"
   }
 }
