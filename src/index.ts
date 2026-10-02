@@ -15,6 +15,7 @@ for (const [key, value] of Object.entries({
   TRADE_SIZE_MON: config.tradeSizeMon, MAX_POSITION_MON: config.maxPositionMon,
   BANKROLL_USD: config.bankrollUsd, MAX_BOOK_AGE_BLOCKS: config.maxBookAgeBlocks,
   MAX_SPREAD_BPS: config.maxSpreadBps, MAX_SESSION_GAS_MON: config.maxSessionGasMon,
+  MAX_SESSION_QUOTES: config.maxSessionQuotes,
   MAX_SESSION_LOSS_USD: config.maxSessionLossUsd, JEV_USD_PER_MTOK: config.jevUsdPerMTok,
   MAX_PRE_SEND_MS: config.maxPreSendMs, MAX_MARGIN_AGE_MS: config.maxMarginAgeMs,
   MAX_EVENT_LOG_MB: config.maxEventLogMb, RPC_TIMEOUT_MS: config.rpcTimeoutMs,
@@ -23,6 +24,7 @@ for (const [key, value] of Object.entries({
 }
 if (!Number.isInteger(config.maxBookAgeBlocks) || !Number.isInteger(config.quoteInsideTicks) || config.quoteInsideTicks < 0)
   throw new Error("MAX_BOOK_AGE_BLOCKS must be a positive integer and QUOTE_INSIDE_TICKS a nonnegative integer");
+if (!Number.isInteger(config.maxSessionQuotes)) throw new Error("MAX_SESSION_QUOTES must be a positive integer");
 
 if (!config.dryRun) {
   const wallet = new ethers.Wallet(config.privateKey!);
