@@ -24,6 +24,7 @@ type Action =
   | { type: "block"; event: BlockEvent }
   | { type: "fill"; block: number; fill: Fill }
   | { type: "quote"; block: number; quote: Quote }
+  | { type: "cancel"; block: number; quote: Quote }
   | { type: "connection"; connection: ConnectionState };
 
 const initialState: State = {
@@ -170,6 +171,16 @@ function reducer(state: State, action: Action): State {
       };
     }
 
+    case "cancel": {
+      const idx = indexOfBlock(state.events, action.block);
+      if (idx < 0) return state;
+      const events = state.events.slice();
+      const q = action.quote;
+      const updated: BlockEvent = { ...events[idx], cancel: { status: q.status, orderIds: q.cancel, txHash: q.txHash, gasMon: q.gasMon } };
+      events[idx] = updated;
+      return { ...state, events, latest: idx === events.length - 1 ? updated : state.latest };
+    }
+
     default:
       return state;
   }
@@ -281,6 +292,11 @@ export function useFeed(apiUrl: string): FeedState {
         const d = (data ?? {}) as { block?: number; quote?: Quote };
         if (typeof d.block !== "number" || !d.quote) return;
         dispatch({ type: "quote", block: d.block, quote: d.quote });
+      });
+      handle("cancel", (data) => {
+        const d = (data ?? {}) as { block?: number; quote?: Quote };
+        if (typeof d.block !== "number" || !d.quote || !d.quote.cancelOnly) return;
+        dispatch({ type: "cancel", block: d.block, quote: d.quote });
       });
       handle("ping", () => {
         dispatch({ type: "connection", connection: "live" });

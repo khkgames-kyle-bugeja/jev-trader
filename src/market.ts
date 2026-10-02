@@ -36,6 +36,8 @@ export interface Quote {
   cancel: number[]; // resting order ids this tx cancels
   status: "sent" | "placed" | "reverted" | "lost" | "sim";
   orderId: number | null;
+  /** Cancellation-only transaction, not a new maker quote. */
+  cancelOnly?: boolean;
   /** The position cap or margin funds picked this side; the model's probabilities still show its call. */
   capped: boolean;
 }
@@ -61,6 +63,9 @@ const ERC20_ABI = [
 const gwei = (n: number) => ethers.utils.parseUnits(String(n), "gwei");
 const BN = ethers.BigNumber;
 const ZERO_ADDRESS = ethers.constants.AddressZero;
+const VERIFIED_MARKET = "0x065C9d28E428A0db40191a54d33d5b7c71a9C394";
+const VERIFIED_MARGIN = "0x2A68ba1833cDf93fa9Da1EEbd7F46242aD8E90c5";
+const VERIFIED_USDC = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603";
 
 interface Pending { block: number; quote: Quote; gasLimit: ethers.BigNumber }
 
@@ -72,6 +77,7 @@ export class Market {
   params!: Kuru.MarketParams; // public so scripts can build txs without init()
   /** Margin account balances, refreshed every `config.refreshBlocks`. Limit orders draw from here. */
   margin = { mon: 0, usdc: 0 };
+  marginUpdatedAt = 0;
   private iface = new ethers.utils.Interface(OrderBookAbi.abi);
   private marginIface = new ethers.utils.Interface(MarginAccountAbi.abi);
   private nonce = 0;
@@ -79,6 +85,7 @@ export class Market {
   private gasLimit = BN.from(config.gasLimitFallback);
   private useVault = false;
   private pending = new Map<string, Pending>();
+  safetyHaltReason: string | null = null; // fail closed after an ambiguous send or missing receipt
 
   get address() { return this.wallet?.address ?? null; }
   get estimatedQuoteGasMon() { return this.wallet ? this.gasMon(this.gasLimit, this.feeWei) : 0; }
@@ -88,10 +95,15 @@ export class Market {
 
   async init() {
     this.params = await Kuru.ParamFetcher.getMarketParams(this.provider, config.market);
+    if (this.wallet && (
+      config.market.toLowerCase() !== VERIFIED_MARKET.toLowerCase() ||
+      config.marginAccount.toLowerCase() !== VERIFIED_MARGIN.toLowerCase() ||
+      this.params.quoteAssetAddress.toLowerCase() !== VERIFIED_USDC.toLowerCase()
+    )) throw new Error("Live mode is restricted to the verified Monad mainnet Kuru MON-USDC market, margin account and USDC token");
     await this.refresh();
     if (!this.wallet) return;
     await this.resyncNonce();
-    await this.ensureMargin();
+    if (config.autoDepositMargin) await this.ensureMargin();
     await this.initGasLimit();
   }
 
@@ -107,6 +119,7 @@ export class Market {
     if (vault.status === "fulfilled") this.useVault = vaultActive(vault.value);
     if (mon.status === "fulfilled" && mon.value) this.margin.mon = Number(ethers.utils.formatUnits(mon.value, this.params.baseAssetDecimals.toNumber()));
     if (usdc.status === "fulfilled" && usdc.value) this.margin.usdc = Number(ethers.utils.formatUnits(usdc.value, this.params.quoteAssetDecimals.toNumber()));
+    if (this.wallet && mon.status === "fulfilled" && usdc.status === "fulfilled") this.marginUpdatedAt = Date.now();
   }
 
   /** One eth_call (two batched into one HTTP request once the vault is live). */
@@ -136,6 +149,7 @@ export class Market {
   async send(block: number, side: Side, sizeMon: number, book: Book, cancel: number[], capped: boolean): Promise<Quote> {
     const price = this.quotePrice(side, book);
     if (!this.wallet) return { side, price, size: sizeMon, txHash: null, gasMon: 0, cancel, status: "sim", orderId: null, capped };
+    if (this.safetyHaltReason) throw new Error(`Live send blocked: ${this.safetyHaltReason}`);
 
     const tx = this.buildTx(side, sizeMon, price, cancel);
     const signed = await this.wallet.signTransaction(tx);
@@ -144,12 +158,48 @@ export class Market {
       hash = await rpc<string>("eth_sendRawTransaction", [signed]);
       this.nonce++;
     } catch (e) {
+      this.safetyHaltReason = "order broadcast outcome uncertain; manual transaction/nonce reconciliation required";
       await this.resyncNonce().catch(() => {});
       throw e;
     }
     const quote: Quote = { side, price, size: sizeMon, txHash: hash, gasMon: this.gasMon(this.gasLimit, this.feeWei), cancel, status: "sent", orderId: null, capped };
     this.pending.set(hash, { block, quote, gasLimit: this.gasLimit });
     return quote;
+  }
+
+  /** Cancel confirmed resting orders on a risk stop. No replacement order is created. */
+  async cancelResting(block: number, ids: number[]): Promise<Quote | null> {
+    if (!this.wallet || !ids.length) return null;
+    if (this.safetyHaltReason) throw new Error(`Cancellation requires manual reconciliation: ${this.safetyHaltReason}`);
+    const data = this.encodeCancel(ids);
+    // Cancellation is off the quote hot path. Estimate rather than risk an undersized hardcoded limit.
+    const estimate = await this.provider.estimateGas({ to: config.market, from: this.wallet.address, data });
+    const gasLimit = estimate.mul(125).div(100).add(20_000);
+    const signed = await this.wallet.signTransaction({
+      type: 2, chainId: config.chainId, to: config.market, nonce: this.nonce,
+      gasLimit, maxFeePerGas: gwei(config.maxFeeGwei), maxPriorityFeePerGas: gwei(config.priorityFeeGwei),
+      data, value: BN.from(0),
+    });
+    let hash: string;
+    try {
+      hash = await rpc<string>("eth_sendRawTransaction", [signed]);
+      this.nonce++;
+    } catch (e) {
+      this.safetyHaltReason = "cancel broadcast outcome uncertain; inspect wallet and orders before sending again";
+      await this.resyncNonce().catch(() => {});
+      throw e;
+    }
+    const quote: Quote = {
+      side: "buy", price: 0, size: 0, txHash: hash,
+      gasMon: this.gasMon(gasLimit, this.feeWei), cancel: ids,
+      status: "sent", orderId: null, capped: false, cancelOnly: true,
+    };
+    this.pending.set(hash, { block, quote, gasLimit });
+    return quote;
+  }
+
+  encodeCancel(ids: number[]): string {
+    return this.iface.encodeFunctionData("batchCancelOrders", [ids.map((id) => BN.from(id))]);
   }
 
   /** One eth_getTransactionReceipt per in-flight tx. Returns whatever resolved (or timed out). */
@@ -166,6 +216,7 @@ export class Market {
       } else if (block - p.block >= config.pendingBlocks) {
         this.pending.delete(hash);
         lost = true;
+        this.safetyHaltReason = `transaction ${hash} has no receipt after ${config.pendingBlocks} blocks; manual reconciliation required`;
         out.push({ block: p.block, quote: { ...p.quote, status: "lost", gasMon: 0 }, canceled: [] });
       }
     }));
@@ -236,7 +287,7 @@ export class Market {
       const dep = have.lt(amt) ? have : amt;
       if (dep.gt(0)) {
         const allowance: ethers.BigNumber = await token.allowance(w.address, config.marginAccount);
-        if (allowance.lt(dep)) { const tx = await token.approve(config.marginAccount, ethers.constants.MaxUint256, { nonce: this.nonce++ }); await tx.wait(1); }
+        if (allowance.lt(dep)) { const tx = await token.approve(config.marginAccount, dep, { nonce: this.nonce++ }); await tx.wait(1); }
         console.log(`margin: depositing ${ethers.utils.formatUnits(dep, quoteDec)} USDC`);
         await deposit(this.params.quoteAssetAddress, dep, false);
       }
@@ -277,6 +328,6 @@ export class Market {
   }
 
   private async resyncNonce() {
-    this.nonce = parseInt(await rpc<string>("eth_getTransactionCount", [this.wallet!.address, "latest"]), 16);
+    this.nonce = parseInt(await rpc<string>("eth_getTransactionCount", [this.wallet!.address, "pending"]), 16);
   }
 }

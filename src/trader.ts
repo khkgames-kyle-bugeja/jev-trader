@@ -1,5 +1,6 @@
-import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { config } from "./config";
+import { EventLog } from "./event-log";
 import { Market, type Book, type Fill, type Quote, type QuoteResult, type Side } from "./market";
 import type { Action, Decision, Model, TradeState } from "./model";
 import { TradeFeed, type MakerFill, type TradePrint } from "./trades";
@@ -18,6 +19,8 @@ export interface BlockEvent {
   pauseReason: string | null;
   /** The order this block put on the book. */
   quote: Quote | null;
+  /** Receipt of an explicit cancellation sent on a risk stop. */
+  cancel: { status: Quote["status"]; orderIds: number[]; txHash: string | null; gasMon: number } | null;
   /** Maker fills that landed in this block (aggregated), attached when the trade logs for it arrive. */
   fill: Fill | null;
   /** Our size known to be resting on the book after this block's order. */
@@ -59,6 +62,7 @@ interface Resting { side: Side; price: number; size: number; block: number }
  */
 export class Trader {
   readonly history: BlockEvent[] = [];
+  private eventLog = new EventLog("data/events.jsonl", config.maxEventLogMb * 1024 * 1024);
   private mids: number[] = [];
   private busy = false;
   private pendingLateBlocks: number[] = [];
@@ -70,6 +74,7 @@ export class Trader {
   private paperOrders = new Map<number, PaperOrder>();
   /** Live quotes sent but not yet confirmed; they may become resting orders, so they count toward the cap. */
   private inflight = new Map<string, Quote>();
+  private cancelInFlight = false;
   private simId = 0;
   private position = { mon: 0, costUsd: 0 }; // signed inventory and its cost basis
   private totals: Totals = { blocks: 0, decisions: 0, quotes: 0, fills: 0, reverted: 0, lateBlocks: 0, jevUsd: 0, gasMon: 0, gasUsd: 0, realizedUsd: 0, pnlUsd: 0, pnlMon: 0, pnlPct: 0 };
@@ -80,9 +85,7 @@ export class Trader {
     private onEvent: (e: BlockEvent, timing?: Timing) => void,
     private onFill: (block: number, fill: Fill) => void = () => {},
     private onQuote: (block: number, quote: Quote) => void = () => {},
-  ) {
-    mkdirSync("data", { recursive: true });
-  }
+  ) {}
 
   /** Call once the market params are known. Without it `trades` in the state is all zeros and no fills are ever seen. */
   attachTradeFeed(sizeDec: number) {
@@ -108,13 +111,9 @@ export class Trader {
       if (this.mids.length > 400) this.mids.shift();
       this.trades?.poll(block).then(() => this.harvest()); // off the hot path: eth_getLogs for prints (and our fills) since the last poll
 
-      const reason = pauseReason({
-        block, book, paused: existsSync("data/PAUSE"),
-        pnlUsd: this.totals.realizedUsd + this.unrealizedUsd(book.mid) - this.totals.gasUsd - this.totals.jevUsd,
-        gasMon: this.totals.gasMon + [...this.inflight.values()].reduce((sum, q) => sum + q.gasMon, 0),
-        nextGasMon: this.market.estimatedQuoteGasMon,
-      }, config);
+      const reason = this.riskReason(block, book);
       if (reason) {
+        await this.cancelOnPause(block);
         this.emit(block, book, null, null, false, { readMs: Math.round(readMs), loopMs: Math.round(performance.now() - t0) }, reason);
         return;
       }
@@ -125,6 +124,16 @@ export class Trader {
       const side: Side | null = this.allowed(wanted, book) ? wanted : null;
       this.totals.decisions++;
       if (this.model.name !== "mock") this.totals.jevUsd += (decision.inputTokens / 1e6) * config.jevUsdPerMTok;
+
+      // A new head, stop file, fill or receipt may have changed safety during inference.
+      const preSendReason = this.riskReason(block, book) ||
+        (performance.now() - t0 > config.maxPreSendMs ? "pre-send latency budget" : null);
+      if (preSendReason || !side) {
+        const why = preSendReason ?? "inventory or margin limit";
+        await this.cancelOnPause(block);
+        this.emit(block, book, decision, null, false, { readMs: Math.round(readMs), loopMs: Math.round(performance.now() - t0) }, why);
+        return;
+      }
 
       let quote: Quote | null = null;
       if (side) {
@@ -139,9 +148,11 @@ export class Trader {
           this.inflight.set(quote.txHash, quote);
         }
       }
-      this.emit(block, book, decision, quote, false, { readMs: Math.round(readMs), loopMs: Math.round(performance.now() - t0) }, side ? null : "inventory or margin limit");
+      this.emit(block, book, decision, quote, false, { readMs: Math.round(readMs), loopMs: Math.round(performance.now() - t0) });
     } catch (e) {
       console.error(`block ${block}:`, (e as Error).message);
+      await this.cancelOnPause(block);
+      if (this.lastBook) this.emit(block, this.lastBook, null, null, false, undefined, "book, model or send error");
     } finally {
       // A later head can arrive while this block's RPC/model work is still in flight.
       // Publish the completed block first, then the skipped heads, never in reverse order.
@@ -160,14 +171,42 @@ export class Trader {
 
   private applyQuoteResult({ block, quote, canceled }: QuoteResult) {
     if (quote.txHash) this.inflight.delete(quote.txHash);
+    if (quote.cancelOnly) this.cancelInFlight = false;
     this.totals.gasMon += quote.gasMon; // charged on reverts too
     this.totals.gasUsd += quote.gasMon * (this.lastBook?.mid ?? 0); // approximate conversion at receipt time
     if (quote.status === "reverted") this.totals.reverted++;
     for (const id of canceled) this.orders.delete(id);
-    if (quote.status === "placed" && quote.orderId !== null) this.orders.set(quote.orderId, { side: quote.side, price: quote.price, size: quote.size, block });
+    if (!quote.cancelOnly && quote.status === "placed" && quote.orderId !== null) this.orders.set(quote.orderId, { side: quote.side, price: quote.price, size: quote.size, block });
     const e = this.history.find((h) => h.block === block);
-    if (e) e.quote = quote;
+    if (e && quote.cancelOnly) e.cancel = { status: quote.status, orderIds: quote.cancel, txHash: quote.txHash, gasMon: quote.gasMon };
+    else if (e) e.quote = quote;
     this.onQuote(block, quote);
+  }
+
+  private riskReason(block: number, book: Book) {
+    if (this.market.safetyHaltReason) return this.market.safetyHaltReason;
+    if (this.market.wallet && (!Number.isFinite(this.market.marginUpdatedAt) ||
+      Date.now() - this.market.marginUpdatedAt > config.maxMarginAgeMs)) return "stale margin balance";
+    return pauseReason({
+      block, book, paused: existsSync("data/PAUSE"),
+      pnlUsd: this.totals.realizedUsd + this.unrealizedUsd(book.mid) - this.totals.gasUsd - this.totals.jevUsd,
+      gasMon: this.totals.gasMon + [...this.inflight.values()].reduce((sum, q) => sum + q.gasMon, 0),
+      nextGasMon: this.market.estimatedQuoteGasMon,
+    }, config);
+  }
+
+  /** A risk pause stops new quotes AND attempts to remove all known resting live orders. */
+  private async cancelOnPause(block: number) {
+    if (!this.market.wallet || !this.orders.size || this.cancelInFlight || this.market.safetyHaltReason) return;
+    try {
+      const cancellation = await this.market.cancelResting(block, [...this.orders.keys()]);
+      if (cancellation?.txHash) {
+        this.cancelInFlight = true;
+        this.inflight.set(cancellation.txHash, cancellation);
+      }
+    } catch (e) {
+      console.error(`block ${block}: failed to cancel resting orders:`, (e as Error).message);
+    }
   }
 
   /** After each trade-log poll: apply our maker fills (live) or simulate them against the new prints (dry run). */
@@ -293,6 +332,7 @@ export class Trader {
         ? { action: "hold", probabilities: { buy: 0, sell: 0, hold: 1 }, upIn10: 0.5, latencyMs: 0, late: true }
         : decision && { action: decision.action, probabilities: decision.probabilities, upIn10: decision.upIn10, latencyMs: Math.round(decision.latencyMs), late: false },
       quote,
+      cancel: null,
       fill: null,
       resting: { bidMon: round(this.restingMon("buy"), 1), askMon: round(this.restingMon("sell"), 1) },
       position: {
@@ -303,7 +343,7 @@ export class Trader {
     };
     this.history.push(event);
     if (this.history.length > config.historySize) this.history.shift();
-    appendFileSync("data/events.jsonl", JSON.stringify(event) + "\n");
+    this.eventLog.append(event);
     this.onEvent(event, timing);
   }
 }

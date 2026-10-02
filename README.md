@@ -1,82 +1,58 @@
-# jev-trader
+# jev-trader (safety-first fork)
 
-One decision every Monad block. A TypeSafe Jev model watches the Kuru MON-USDC order book and answers buy or sell every ~300 ms. When risk limits permit, the bot posts a post-only limit order on that side, one tick inside the touch, replacing the last one. Maker orders can earn the spread when filled, but fills are not guaranteed and adverse selection, gas, and inference costs can outweigh it. A small server streams every block to the dashboard.
+An experimental TypeSafe Jev + Kuru MON-USDC market-making bot on Monad. It reads a live order book, chooses a **post-only maker bid or ask**, and streams decisions to a dashboard. **It has no proven trading edge.** Maker fills are uncertain; gas, adverse selection and model costs can exceed any captured spread. The default is a **no-key, no-transaction paper run**.
 
-## Run
+## Accounts and funding
 
-    cp .env.example .env
-    bun install
-    bun run start
+| Mode | What you need |
+| --- | --- |
+| Mock paper trading | [Bun](https://bun.com/docs/installation) and an internet connection; no account, wallet, token or API key. |
+| Jev paper trading | A [TypeSafe account and API key](https://console.typesafe.ai/keys); API usage may cost money. Keep `DRY_RUN=true`, leave `PRIVATE_KEY` blank, set `MODEL=jev` and `TYPESAFE_AI_API_KEY`. |
+| Future live use | A **new dedicated [Monad mainnet wallet](https://docs.monad.xyz/guides/add-monad-to-wallet/mainnet)** (chain ID 143), native **MON** for wallet gas and sell-side Kuru margin, and the correct mainnet **USDC** for buy-side Kuru margin. The MON-USDC book's minimum order is **200 MON**. [Kuru's verified mainnet addresses](https://docs.kuru.io/contracts/Contract-addresses) identify the market, margin account and USDC; [Monad's official token list](https://docs.monad.xyz/developer-essentials/network-information/tokens-and-bridges) lists USDC at `0x754704Bc059F8C67012fEd69BC8A327a5aafb603`. A [dedicated RPC provider](https://docs.monad.xyz/tooling-and-infra/rpc-providers) is advisable for low latency. No separate Kuru login is needed by this bot. |
 
-With no `PRIVATE_KEY` it dry-runs: real book, real decisions, simulated fills. Set `MODEL=jev` and `TYPESAFE_AI_API_KEY` to use Jev; the default `mock` is a momentum heuristic stand-in.
+**Do not fund a live wallet for this bot yet.** We have not tested a funded live wallet or demonstrated profitability. If you are studying the requirements: one minimum-size **ask** needs at least 200 MON **in Kuru margin**; one minimum-size **bid** needs approximately `200 × current ask` USDC **in Kuru margin**. The wallet separately needs MON for gas, including cancellation/reverts, and TypeSafe usage is separate. `MARGIN_MON=600` and `MARGIN_USDC=20` in `.env.example` are optional **auto-deposit targets**, not recommended funding amounts. Auto-deposit is **off** by default. Never send funds to a contract or token address based only on a pasted address: confirm it against the official links and the bot's read-only preflight.
 
-### Safety-first fork changes
+## Run a paper session
 
-This fork is **paper-first**, not a profitable or production-ready strategy:
+```sh
+git clone https://github.com/khkgames-kyle-bugeja/jev-trader.git
+cd jev-trader
+cp .env.example .env
+bun install
+bun run preflight  # reads official market parameters; no key or transaction
+bun run test
+bun run typecheck
+bun run start      # backend API at http://localhost:3000
+```
 
-- Jev's question now describes the **actual maker quote**, uncertain fills, inventory and quote gas. It no longer describes an immediate-or-cancel order that crosses the spread.
-- Paper fills require a trade print **strictly through** our price. Same-price prints are not credited because we cannot establish queue priority. Replaced paper orders are kept until the log poll catches up. This is still only an approximation of fills.
-- New quoting pauses if the book is invalid/stale, the spread is too wide, or session loss/gas limits are reached. `touch data/PAUSE` stops **new** quotes on the next processed block; `rm data/PAUSE` resumes. This does **not** cancel existing live orders. The dashboard distinguishes `PAUSED` from `LATE`. If inventory or margin blocks the model's side, it does not silently trade the opposite side.
-- P&L includes approximate Jev token spend and gas converted to USD at receipt-time mid. The mock is not charged Jev spend. See `.env.example` for limits and pricing assumptions.
-- **Live transactions require explicit `DRY_RUN=false` and `ENABLE_LIVE_TRADING=true` with `PRIVATE_KEY`.** Do not turn this on yet for unattended use: live order, position and budget reconciliation across restarts is not implemented. Session budgets reset on restart, and the wallet must be isolated and tightly funded.
+The dashboard is a separate Next.js application; see `web/README.md`. The original author's [public deployment](https://jev-trader-production.up.railway.app/) is **not this fork**; inspect its `/` response before trusting its model or dry-run status. To inspect a dedicated wallet and its Kuru margin balances **without its private key**, run `WALLET_ADDRESS=0xYourPublicAddress bun run preflight`. It does not approve, deposit or trade.
 
-Run `bun run test` and `bun run typecheck` before making changes. The backend exposes the API on port 3000; to run the dashboard separately, see `web/README.md`. Never paste a private key into Git or a shared computer. A read-only smoke test on October 2, 2026 observed ~0.4-1.1 s public-RPC book reads, so a 300 ms every-block quote is **not guaranteed** with this setup. Blocks skipped while the loop is busy are reported as `late`; history and SSE preserve block order.
+## Safety controls and limitations
 
-## Endpoints
+- `MODEL=mock` is a deterministic stand-in. `MODEL=jev` sends real decisions to TypeSafe. The prompt describes the actual maker quote, not an immediate taker fill.
+- Paper fills require a real print **strictly through** the hypothetical quote; equal-price prints do not claim queue priority. Delayed logs retain replaced quotes until the feed catches up. This remains an approximation, **not a backtest**.
+- The bot rejects invalid/stale books, wide spreads, stale live margin data, excessive session loss/gas and decisions that miss `MAX_PRE_SEND_MS` (default **750 ms paper**, **200 ms live**). It never silently switches to the opposite side when the model's side is blocked. See `.env.example` for limits. Session limits reset after a manual restart, not at midnight.
+- `touch data/PAUSE` stops new quotes on the next processed block. In live mode, it **attempts to cancel known resting orders** via `batchCancelOrders`; wait for a cancellation receipt and independently check on-chain state. If a transaction has an uncertain outcome, the bot **halts further sends** and requires manual reconciliation. A pause does not magically revoke unknown orders or pending transactions.
+- Live mode needs `PRIVATE_KEY`, `DRY_RUN=false`, `ENABLE_LIVE_TRADING=true` and an **existing absolute `LIVE_STATE_DIR` on a private persistent volume**. A private marker is created *before* startup work; any subsequent live start refuses to run until an operator reconciles orders, pending transactions, inventory and balances. **Do not delete the marker merely to make the bot start.** This is fail-closed restart protection, **not automatic recovery**. Never run two copies for one wallet, put a primary wallet key in `.env`, commit secrets, or use an ephemeral directory for `LIVE_STATE_DIR`.
+- Startup deposits are **disabled** unless `AUTO_DEPOSIT_MARGIN=true` is explicitly set. That setting can move MON/USDC from the wallet into Kuru margin and performs exact-amount (not unlimited) USDC approval. The bot pins live use to the verified Monad MON-USDC market, official margin account and USDC token.
+- P&L includes estimated Jev spend and gas converted to USD at receipt-time midpoint. It excludes other possible costs and is **not a verified statement**. The mock does not incur Jev charges. `JEV_USD_PER_MTOK` is an indicative input; verify provider pricing yourself.
+- In our October 2, 2026 sandbox test, warm public-RPC reads took about **0.4-1.1 seconds**. A 300 ms quote cadence is therefore **not achievable here**. Use `/metrics` to measure your own p50/p95/p99 and a suitably located low-latency RPC. A latency budget skips a late quote rather than disguising it as an in-block fill.
+- Run `bun run bench:rpc` from the intended host to compare four official public read endpoints. `RPC_CANDIDATES=https://your-dedicated-rpc` tests your own provider instead. A sub-200 ms **read** p95 is necessary but not sufficient: model inference and the send RPC also take time.
+- `data/events.jsonl` rotates to one `.1` archive when it reaches `MAX_EVENT_LOG_MB` (20 MB by default). The in-memory `/history` window remains separate.
 
-Original upstream deployment (not this fork; inspect its current `/` response for model and dry-run status): https://jev-trader-production.up.railway.app
+**Live operation still requires an operator and funded-wallet testing.** On-chain per-wallet open orders cannot be enumerated directly from the pinned Kuru SDK/ABI; its relevant event owners are not indexed. This fork deliberately refuses to auto-resume a prior live session. Treat restart recovery, any unknown pre-existing orders, provider outages, and strategy profitability as unresolved before meaningful funding.
 
-- `GET /` snapshot: model, wallet, dryRun, latest block event
-- `GET /history` last 1000 block events
-- `GET /events` SSE: `snapshot` on connect, then one `block` event per block, plus a `fill` event whenever a live order's receipt lands
+## API and layout
 
-Every event (see `src/trader.ts` for types):
+- `GET /` snapshot (model, wallet, dry-run, most recent event).
+- `GET /health` feed freshness, last block and pause state; `ready` means recent feed activity, **not permission to fund or trade**.
+- `GET /metrics` rolling 1,000-sample read/loop latency percentiles and recent totals.
+- `GET /history` last 1,000 block events; `GET /events` SSE events: `snapshot`, `block`, `quote`, `cancel`, `fill`, `ping`.
+- `src/chain.ts`: WebSocket heads and HTTP polling backstop. `src/book.ts`: batched read/decode of Kuru book and optional vault. `src/market.ts`: live quote, receipt and cancel transactions. `src/trader.ts`: serialized decisions, risk and inventory. `src/paper.ts`: conservative simulated fills. `src/live-guard.ts`: one-run marker. `src/server.ts`: read-only feed and health endpoints.
 
-    {
-      "block": 105488269, "ts": 1789593630676,
-      "mid": 0.022636, "bestBid": 0.022628, "bestAsk": 0.022644, "spreadBps": 7.07,
-      "decision": { "action": "buy", "probabilities": { "buy": 0.77, "sell": 0.23, "hold": 0 }, "upIn10": 0.77, "latencyMs": 81, "late": false },
-      "quote": { "side": "buy", "price": 0.022629, "size": 200, "txHash": "0x…", "gasMon": 0.0357, "cancel": [100295801], "status": "sent", "orderId": null, "capped": false },
-      "fill": null,
-      "resting": { "bidMon": 200, "askMon": 200 },
-      "position": { "side": "short", "size": 200, "entryPrice": 0.022633, "unrealizedUsd": -0.0006, "unrealizedMon": -0.027 },
-      "totals": { "blocks": 3, "decisions": 3, "quotes": 3, "fills": 1, "reverted": 0, "lateBlocks": 0, "jevUsd": 0.000004, "gasMon": 0.107, "gasUsd": 0.0024, "realizedUsd": 0, "pnlUsd": -0.003, "pnlMon": -0.13, "pnlPct": -0.003 }
-    }
+A `quote` event describes **intent** until a receipt changes it to `placed`, `reverted` or `lost`. A `cancel` event describes a risk-stop cancellation, not a new quote. A `fill` event comes from another user's taker transaction; in dry-run it is simulated. Paused blocks have `pauseReason`; skipped overlapping heads have `decision.late: true`. The legacy `upIn10` field equals buy probability, **not a calibrated direction prediction**.
 
-On eligible blocks the model is asked which maker quote is better over `HORIZON_BLOCKS` (default 100, ~30 s) and answers `buy` or `sell`. `quote` is a post-only limit order of `TRADE_SIZE_MON` on that side, `QUOTE_INSIDE_TICKS` inside the touch (clamped to the touch when the spread is too tight), in one `batchUpdate` that also cancels everything we had resting (`cancel`). An operational stop has `pauseReason` and no decision or quote; an overlapping inference has `decision.late: true` and no quote. If the model's side violates the position cap or lacks margin, the decision is reported with no quote and `pauseReason` explains why. `resting` is our size known to be on the book after this block. The legacy `upIn10` field equals the buy probability, not a calibrated prediction of price direction.
-
-Live sends are fired and forgotten, so the `block` event carries the **intent**: `status: "sent"`, `gasMon` is `gasLimit x (last known base fee + priority)`. Monad charges the gas limit, so that is the real cost whether the order lands or not. The receipt arrives a block or two later as its own SSE event:
-
-    event: quote
-    data: { "block": 105488269, "quote": { …, "status": "placed", "orderId": 100295812, "gasMon": 0.0357 } }
-
-`status` becomes `placed` (with the order id) or `reverted` (the book moved through the price before the tx landed, or a cancelled order had already filled). No receipt after 10 blocks gives `lost`. Fills are not in our own transactions: someone else's taker order hits our resting one, and the Trade log for it arrives via the same `eth_getLogs` poll that feeds the model. Each block with fills gets its own SSE event, and `position`, `realizedUsd` and `fills` update then:
-
-    event: fill
-    data: { "block": 105488271, "fill": { "side": "buy", "size": 200, "price": 0.022629, "txHash": "0x…", "orderId": 100295812, "simulated": false } }
-
-`txHash` is the taker's transaction. In a dry run the quote is `status: "sim"`: the order rests for one block and a real print crossing its price fills it (`simulated: true`).
-
-## Layout
-
-    src/config.ts   env
-    src/chain.ts    block feed (WebSocket newHeads + polling backstop, newest block only), raw RPC
-    src/book.ts     one-eth_call order book reader (decodes getL2Book, merges the AMM vault)
-    src/market.ts   Kuru: read book, hand-encoded batchUpdate (cancel + post-only place), margin deposits, local nonce, async confirmation
-    src/model.ts    Model interface, JevModel (AI SDK experimental_evaluate), MockModel
-    src/trader.ts   the loop: one in flight, hold when late, position and P&L accounting
-    src/server.ts   Bun.serve: snapshot, history, SSE
-
-## The 300 ms budget
-
-A decision and an order have to fit in one block, so the hot loop makes exactly two RPC round trips:
-one `eth_call` for the book (~18 ms on the public RPC, `READ_RPC_URL`) and one `eth_sendRawTransaction`
-(`RPC_URL`), which returns as soon as the tx is accepted. Nothing else is on the path — no
-`eth_estimateGas` (Monad charges gas on the limit, so the limit is hardcoded or derived once at
-startup), no `eth_sendRawTransactionSync` (it blocks until the tx is Proposed), no gas price lookup
-(static type-2 fees: `MAX_FEE_GWEI` cap, 2 gwei priority; the effective price is base + priority).
-Receipts, the fee estimate and the vault check run off the hot path on later blocks. Measured in a
-dry run with the mock model: read p50 18 ms, whole loop p50 100 ms (80 ms of it the mock's inference stand-in).
-
-    bun run scripts/bench-read.ts     # book reader vs the SDK: exactness and latency
-    bun run scripts/dry-encode.ts     # signs a buy and a sell offline, asserts the calldata matches the SDK
+```sh
+bun run scripts/bench-read.ts   # book reader vs SDK latency/exactness
+bun run scripts/dry-encode.ts   # offline calldata comparison, no broadcast
+```

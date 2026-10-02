@@ -1,0 +1,31 @@
+name: Verify trader
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install backend dependencies
+        run: bun install --frozen-lockfile
+      - name: Type check backend
+        run: bun run typecheck
+      - name: Test backend
+        run: bun run test
+      - name: Install dashboard dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+      - name: Build dashboard
+        working-directory: web
+        run: bun run build
