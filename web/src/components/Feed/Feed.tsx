@@ -10,9 +10,10 @@ const ROW_H = 26;
 /** Hard ceiling, so a very tall viewport does not render an absurd list. */
 const MAX_ROWS = 40;
 
-type Kind = "buy" | "sell" | "late";
+type Kind = "buy" | "sell" | "late" | "paused";
 
 function kindOf(event: BlockEvent): Kind {
+  if (event.pauseReason) return "paused";
   const d = event.decision;
   if (!d || d.late) return "late";
   if (d.action === "buy") return "buy";
@@ -28,9 +29,10 @@ const KIND_CLASS: Record<Kind, string> = {
   buy: styles.kindBuy,
   sell: styles.kindSell,
   late: styles.kindLate,
+  paused: styles.kindLate,
 };
 
-const WORD: Record<Kind, string> = { buy: "BUY", sell: "SELL", late: "LATE" };
+const WORD: Record<Kind, string> = { buy: "BUY", sell: "SELL", late: "LATE", paused: "PAUSED" };
 
 /**
  * One row per block. The word is the side the model picked, the detail is the order that went on
@@ -74,7 +76,7 @@ export default function Feed({ events }: { events: BlockEvent[] }) {
             const decision = event.decision;
             const quote = event.quote;
             const fill = event.fill;
-            const decided = kind !== "late";
+            const decided = kind === "buy" || kind === "sell";
             const kindClass = KIND_CLASS[kind];
 
             const conf =
@@ -99,6 +101,9 @@ export default function Feed({ events }: { events: BlockEvent[] }) {
               detailMuted = quote.status === "reverted" || quote.status === "lost";
             } else if (decided) {
               detail = "no quote";
+              detailMuted = true;
+            } else if (event.pauseReason) {
+              detail = event.pauseReason;
               detailMuted = true;
             }
 

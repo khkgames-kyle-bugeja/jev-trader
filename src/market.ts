@@ -81,6 +81,7 @@ export class Market {
   private pending = new Map<string, Pending>();
 
   get address() { return this.wallet?.address ?? null; }
+  get estimatedQuoteGasMon() { return this.wallet ? this.gasMon(this.gasLimit, this.feeWei) : 0; }
   private get priceDec() { return log10(this.params.pricePrecision); }
   private get sizeDec() { return log10(this.params.sizePrecision); }
   private get tickUnits() { return Number(this.params.tickSize.toString()); }

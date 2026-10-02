@@ -39,18 +39,18 @@ export interface Model {
   decide(state: TradeState): Promise<Decision>;
 }
 
-const QUESTIONS = {
+export const QUESTIONS = {
   direction: {
     type: "choice",
     instructions: {
-      question: "Will MON be higher or lower than the current mid after `horizonBlocks` more blocks?",
-      goal: "Trade MON-USDC on Kuru. Blocks are ~300ms; `horizonBlocks` (~30 s) is the horizon. A decision is made every few blocks and held until the next one. The trade crosses the spread (`spreadBps`), so the move must beat that cost.",
-      timing: "The order executes as an immediate-or-cancel market order in the next block.",
-      inputs: "Taker flow is the strongest signal: `trades.cvdMon` (taker buys minus taker sells over the horizon), `trades.lastSide` and `recentTrades` show who is hitting the book. `depth` and `book` show resting liquidity per side at several distances from mid; thin depth on one side means price moves easily that way. `returnsBps` and `recentMids` show the path over the horizon. If `allowed.buy` is false the trade will be a sell regardless, and vice versa.",
+      question: "Which post-only quote, a bid to buy MON or an ask to sell MON, has the better risk-adjusted outcome over `horizonBlocks` blocks?",
+      goal: "Market-make MON-USDC on Kuru. A fresh post-only limit order is submitted each ~300 ms block, one tick inside the touch when possible, replacing earlier resting quotes. It may not fill; a fill can be adverse selection. Consider fill likelihood, expected price change conditional on a fill, inventory, and gas per quote. Never assume an immediate market fill or that crossing the spread is required.",
+      timing: "The transaction is submitted now, may land in a later block, and rests only until replaced or filled. The horizon is about 30 seconds by default.",
+      inputs: "`trades.cvdMon`, `trades.lastSide`, and `recentTrades` summarize taker flow. `depth` and `book` show resting liquidity; `returnsBps` and `recentMids` show recent prices. `allowed` indicates inventory or margin constraints, not a guaranteed fill.",
     },
     criteria: {
-      buy: "Buy MON now: mid more likely to be higher after `horizonBlocks` blocks, by more than the spread.",
-      sell: "Sell MON now: mid more likely to be lower after `horizonBlocks` blocks, by more than the spread.",
+      buy: "Post a maker bid for MON: expected value conditional on being filled is better than posting an ask, after inventory and execution costs.",
+      sell: "Post a maker ask for MON: expected value conditional on being filled is better than posting a bid, after inventory and execution costs.",
     },
   },
 } as const;
