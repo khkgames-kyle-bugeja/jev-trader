@@ -11,9 +11,14 @@ export const config = {
   marginAccount: env("MARGIN_ACCOUNT", "0x2A68ba1833cDf93fa9Da1EEbd7F46242aD8E90c5")!,
   privateKey: env("PRIVATE_KEY"),
   dryRun: env("DRY_RUN") === "true" || !env("PRIVATE_KEY"),
+  enableLiveTrading: env("ENABLE_LIVE_TRADING") === "true",
   tradeSizeMon: Number(env("TRADE_SIZE_MON", "200")), // Kuru MON-USDC minimum order is 200 MON
   maxPositionMon: Number(env("MAX_POSITION_MON", "1000")),
   bankrollUsd: Number(env("BANKROLL_USD", "100")), // used for pnlPct
+  maxBookAgeBlocks: Number(env("MAX_BOOK_AGE_BLOCKS", "10")),
+  maxSpreadBps: Number(env("MAX_SPREAD_BPS", "100")),
+  maxSessionGasMon: Number(env("MAX_SESSION_GAS_MON", "1")),
+  maxSessionLossUsd: Number(env("MAX_SESSION_LOSS_USD", "10")),
   /** Quote this many ticks inside the touch (0 = join the best bid/ask). Never crosses: clamps to the touch when the spread is too tight. */
   quoteInsideTicks: Number(env("QUOTE_INSIDE_TICKS", "1")),
   /** Startup deposits into the Kuru margin account, topped up to these balances. Limit orders draw from margin, not the wallet. */
@@ -30,7 +35,7 @@ export const config = {
   horizonBlocks: Number(env("HORIZON_BLOCKS", "100")), // the model is asked about the move over this many blocks (~30 s)
   model: env("MODEL", "mock") as "mock" | "jev",
   jevModelId: env("JEV_MODEL_ID", "jev-latest")!,
-  jevUsdPerMTok: 0.042,
+  jevUsdPerMTok: Number(env("JEV_USD_PER_MTOK", "0.042")), // indicative: confirm current provider price
   port: Number(env("PORT", "3000")),
   historySize: 1000,
 };

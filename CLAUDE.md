@@ -123,3 +123,7 @@ The demo exists to support this tweet. Every design or strategy change must keep
 > Demo link: https://jev-trader.vercel.app
 
 Non-negotiables: Jev makes the buy/sell call (not code), from the price feed; real trades from a real wallet; an order placed on Kuru's on-chain book every 300 ms block; the demo is the live dashboard. Never decide every N blocks. No middle dots, em dashes or en dashes in any rendered text. No blinking or pulsing indicators.
+
+## Safety-first fork clarification
+
+The preceding section describes the original demo aspiration, not a guarantee. In this fork, a risk stop, stale or invalid book, missing margin, or a manual pause **must skip** a new quote rather than force an order or invert Jev's decision. Label a skipped block as paused (or late when inference is still in flight), and never suggest a transaction was sent when none was. Public RPC latency may exceed a block. Keep the default in dry-run mode and do not claim live trading is restart-safe until on-chain reconciliation and safe cancellation are implemented.

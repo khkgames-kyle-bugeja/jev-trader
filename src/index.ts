@@ -6,9 +6,24 @@ import { Trader } from "./trader";
 import { log10 } from "./book";
 import { startServer } from "./server";
 
+if (!config.dryRun && !config.enableLiveTrading) {
+  throw new Error("Live trading requires ENABLE_LIVE_TRADING=true as well as PRIVATE_KEY and DRY_RUN=false. Keep DRY_RUN=true while testing.");
+}
+for (const [key, value] of Object.entries({
+  TRADE_SIZE_MON: config.tradeSizeMon, MAX_POSITION_MON: config.maxPositionMon,
+  BANKROLL_USD: config.bankrollUsd, MAX_BOOK_AGE_BLOCKS: config.maxBookAgeBlocks,
+  MAX_SPREAD_BPS: config.maxSpreadBps, MAX_SESSION_GAS_MON: config.maxSessionGasMon,
+  MAX_SESSION_LOSS_USD: config.maxSessionLossUsd, JEV_USD_PER_MTOK: config.jevUsdPerMTok,
+})) {
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`${key} must be a positive finite number`);
+}
+if (!Number.isInteger(config.maxBookAgeBlocks) || !Number.isInteger(config.quoteInsideTicks) || config.quoteInsideTicks < 0)
+  throw new Error("MAX_BOOK_AGE_BLOCKS must be a positive integer and QUOTE_INSIDE_TICKS a nonnegative integer");
+
 const market = new Market();
 await market.init();
 const model = createModel();
+let previousPause: string | null = null;
 
 const server = startServer(
   { model: model.name, wallet: market.address, dryRun: config.dryRun, market: config.market, startedAt: Date.now() },
@@ -19,6 +34,10 @@ const trader = new Trader(
   model,
   (e, t) => {
     server.broadcast(e);
+    if (e.pauseReason !== previousPause) {
+      console.log(e.pauseReason ? `#${e.block} PAUSED: ${e.pauseReason}` : `#${e.block} RESUMED`);
+      previousPause = e.pauseReason;
+    }
     if (e.decision && !e.decision.late) {
       const p = e.decision.probabilities;
       const q = e.quote;

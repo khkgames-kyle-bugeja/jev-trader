@@ -1,8 +1,10 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { config } from "./config";
 import { Market, type Book, type Fill, type Quote, type QuoteResult, type Side } from "./market";
 import type { Action, Decision, Model, TradeState } from "./model";
 import { TradeFeed, type MakerFill, type TradePrint } from "./trades";
+import { expirePaperOrders, matchPaperFills, type PaperOrder } from "./paper";
+import { pauseReason } from "./risk";
 
 export interface BlockEvent {
   block: number;
@@ -12,6 +14,8 @@ export interface BlockEvent {
   bestAsk: number;
   spreadBps: number;
   decision: { action: Action; probabilities: Record<Action, number>; upIn10: number; latencyMs: number; late: boolean } | null;
+  /** Operational pause; distinct from an inference that missed the block. */
+  pauseReason: string | null;
   /** The order this block put on the book. */
   quote: Quote | null;
   /** Maker fills that landed in this block (aggregated), attached when the trade logs for it arrive. */
@@ -57,10 +61,13 @@ export class Trader {
   readonly history: BlockEvent[] = [];
   private mids: number[] = [];
   private busy = false;
+  private pendingLateBlocks: number[] = [];
   private lastBook: Book | null = null;
   private trades: TradeFeed | null = null;
-  /** Orders we know are resting on the book (live: from receipts; dry run: last block's simulated order). */
+  /** Live orders known to be resting on-chain (from receipts). */
   private orders = new Map<number, Resting>();
+  /** Paper orders remain available to delayed log polls after replacement. */
+  private paperOrders = new Map<number, PaperOrder>();
   /** Live quotes sent but not yet confirmed; they may become resting orders, so they count toward the cap. */
   private inflight = new Map<string, Quote>();
   private simId = 0;
@@ -88,7 +95,7 @@ export class Trader {
     if (this.totals.blocks % config.refreshBlocks === 0) this.market.refresh().catch(() => {}); // fee estimate + margin + vault check
     if (this.busy) {
       this.totals.lateBlocks++;
-      if (this.lastBook) this.emit(block, this.lastBook, null, null, true);
+      this.pendingLateBlocks.push(block);
       return;
     }
     this.busy = true;
@@ -101,31 +108,45 @@ export class Trader {
       if (this.mids.length > 400) this.mids.shift();
       this.trades?.poll(block).then(() => this.harvest()); // off the hot path: eth_getLogs for prints (and our fills) since the last poll
 
+      const reason = pauseReason({
+        block, book, paused: existsSync("data/PAUSE"),
+        pnlUsd: this.totals.realizedUsd + this.unrealizedUsd(book.mid) - this.totals.gasUsd - this.totals.jevUsd,
+        gasMon: this.totals.gasMon + [...this.inflight.values()].reduce((sum, q) => sum + q.gasMon, 0),
+        nextGasMon: this.market.estimatedQuoteGasMon,
+      }, config);
+      if (reason) {
+        this.emit(block, book, null, null, false, { readMs: Math.round(readMs), loopMs: Math.round(performance.now() - t0) }, reason);
+        return;
+      }
+
       const decision = await this.model.decide(this.buildState(block, book));
       const wanted: Side = decision.action === "sell" ? "sell" : "buy";
-      const other: Side = wanted === "buy" ? "sell" : "buy";
-      // The position cap (and, live, margin funds) can only pick the reducing side. The probabilities still show the model's call.
-      const side: Side | null = this.allowed(wanted, book) ? wanted : this.allowed(other, book) ? other : null;
+      // A blocked model call is not converted into an unrequested trade on the opposite side.
+      const side: Side | null = this.allowed(wanted, book) ? wanted : null;
       this.totals.decisions++;
-      this.totals.jevUsd += (decision.inputTokens / 1e6) * config.jevUsdPerMTok;
+      if (this.model.name !== "mock") this.totals.jevUsd += (decision.inputTokens / 1e6) * config.jevUsdPerMTok;
 
       let quote: Quote | null = null;
       if (side) {
-        decision.action = side;
         const cancel = [...this.orders.keys()].filter((id) => id > 0); // simulated orders have negative ids
         quote = await this.market.send(block, side, config.tradeSizeMon, book, cancel, side !== wanted);
         this.totals.quotes++;
         if (quote.status === "sim") {
-          this.orders.clear(); // the simulated cancel
-          this.orders.set(--this.simId, { side, price: quote.price, size: quote.size, block });
+          for (const o of this.paperOrders.values()) if (o.expiresBlock === undefined) o.expiresBlock = block;
+          const id = --this.simId;
+          this.paperOrders.set(id, { id, side, price: quote.price, size: quote.size, placedBlock: block });
         } else if (quote.txHash) {
           this.inflight.set(quote.txHash, quote);
         }
       }
-      this.emit(block, book, decision, quote, false, { readMs: Math.round(readMs), loopMs: Math.round(performance.now() - t0) });
+      this.emit(block, book, decision, quote, false, { readMs: Math.round(readMs), loopMs: Math.round(performance.now() - t0) }, side ? null : "inventory or margin limit");
     } catch (e) {
       console.error(`block ${block}:`, (e as Error).message);
     } finally {
+      // A later head can arrive while this block's RPC/model work is still in flight.
+      // Publish the completed block first, then the skipped heads, never in reverse order.
+      if (this.lastBook) for (const skipped of this.pendingLateBlocks.splice(0)) this.emit(skipped, this.lastBook, null, null, true);
+      else this.pendingLateBlocks.length = 0;
       this.busy = false;
     }
   }
@@ -140,6 +161,7 @@ export class Trader {
   private applyQuoteResult({ block, quote, canceled }: QuoteResult) {
     if (quote.txHash) this.inflight.delete(quote.txHash);
     this.totals.gasMon += quote.gasMon; // charged on reverts too
+    this.totals.gasUsd += quote.gasMon * (this.lastBook?.mid ?? 0); // approximate conversion at receipt time
     if (quote.status === "reverted") this.totals.reverted++;
     for (const id of canceled) this.orders.delete(id);
     if (quote.status === "placed" && quote.orderId !== null) this.orders.set(quote.orderId, { side: quote.side, price: quote.price, size: quote.size, block });
@@ -184,24 +206,17 @@ export class Trader {
    * our bid (or a taker buy at or above our ask) would have taken us first: fill up to the print's size.
    */
   private simFills(prints: TradePrint[]): (Fill & { block: number })[] {
-    const out: (Fill & { block: number })[] = [];
-    for (const p of prints) {
-      for (const [id, o] of this.orders) {
-        if (p.block <= o.block || o.size <= 0) continue;
-        const hit = o.side === "buy" ? p.side === "sell" && p.price <= o.price : p.side === "buy" && p.price >= o.price;
-        if (!hit) continue;
-        const size = Math.min(o.size, p.size);
-        o.size -= size;
-        if (o.size <= 1e-9) this.orders.delete(id);
-        out.push({ side: o.side, size, price: o.price, txHash: null, orderId: id, simulated: true, block: p.block });
-      }
-    }
+    const out = matchPaperFills(this.paperOrders, prints).map((f) => ({
+      ...f, txHash: null, simulated: true,
+    }));
+    expirePaperOrders(this.paperOrders, this.trades?.lastBlock ?? 0);
     return out;
   }
 
   private restingMon(side: Side) {
     let mon = 0;
     for (const o of this.orders.values()) if (o.side === side) mon += o.size;
+    for (const o of this.paperOrders.values()) if (o.side === side && o.expiresBlock === undefined) mon += o.size;
     for (const q of this.inflight.values()) if (q.side === side) mon += q.size;
     return mon;
   }
@@ -264,16 +279,16 @@ export class Trader {
   private entryPrice() { return this.position.mon ? this.position.costUsd / this.position.mon : null; }
   private unrealizedUsd(mid: number) { return this.position.mon ? this.position.mon * (mid - this.entryPrice()!) : 0; }
 
-  private emit(block: number, book: Book, decision: Decision | null, quote: Quote | null, late: boolean, timing?: Timing) {
+  private emit(block: number, book: Book, decision: Decision | null, quote: Quote | null, late: boolean, timing?: Timing, reason: string | null = null) {
     const t = this.totals;
-    t.gasUsd = t.gasMon * book.mid;
     const unrealized = this.unrealizedUsd(book.mid);
-    t.pnlUsd = t.realizedUsd + unrealized - t.gasUsd;
+    t.pnlUsd = t.realizedUsd + unrealized - t.gasUsd - t.jevUsd;
     t.pnlMon = t.pnlUsd / book.mid;
     t.pnlPct = (t.pnlUsd / config.bankrollUsd) * 100;
     const size = Math.abs(this.position.mon);
     const event: BlockEvent = {
       block, ts: Date.now(), mid: book.mid, bestBid: book.bid, bestAsk: book.ask, spreadBps: round(book.spreadBps, 2),
+      pauseReason: reason,
       decision: late
         ? { action: "hold", probabilities: { buy: 0, sell: 0, hold: 1 }, upIn10: 0.5, latencyMs: 0, late: true }
         : decision && { action: decision.action, probabilities: decision.probabilities, upIn10: decision.upIn10, latencyMs: Math.round(decision.latencyMs), late: false },
